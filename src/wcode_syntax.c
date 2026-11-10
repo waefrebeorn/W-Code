@@ -28,6 +28,18 @@ static const char *g_c_keywords[] = {
     NULL
 };
 
+/* Lua keywords -- the .WET / Wua surface, which is what a .wet author types. */
+static const char *g_lua_keywords[] = {
+    "and","break","do","else","elseif","end","false","for","function","goto",
+    "if","in","local","nil","not","or","repeat","return","then","true","until",
+    "while",
+    /* The .WET element names and the calls a .wet script makes constantly. */
+    "wet","self","applet","stack","dock","canvas","grid","label","button",
+    "textbox","checkbox","listbox","progress","slider","groupbox","image",
+    "separator","find","messagebox","create","attach","add","checked","clicks",
+    NULL
+};
+
 static bool in_list(const char *s, size_t n, const char **list) {
     for (int i = 0; list[i]; i++) {
         if (strlen(list[i]) == n && strncmp(list[i], s, n) == 0)
@@ -48,6 +60,11 @@ const char *wcode_lang_for_path(const char *path) {
     if (strcasecmp(dot, "hc") == 0 || strcasecmp(dot, "holyd") == 0 ||
         strcasecmp(dot, "temple") == 0)
         return "holyc";
+    /* .WET applets, VWS forms and Wua scripts are Lua.  A .vws file IS a .wet
+     * file, so both extensions get the same colouring. */
+    if (strcasecmp(dot, "wet") == 0 || strcasecmp(dot, "vws") == 0 ||
+        strcasecmp(dot, "lua") == 0)
+        return "lua";
     if (strcasecmp(dot, "md") == 0 || strcasecmp(dot, "txt") == 0)
         return "text";
     return "c";
@@ -63,15 +80,21 @@ WCodeTokKind wcode_tok_classify(const char *s, size_t n, const char *lang,
 
     if (s[0] == '/' && n >= 2 && s[1] == '/') return WCODE_TOK_COMMENT;
     if (s[0] == '/' && n >= 2 && s[1] == '*') return WCODE_TOK_COMMENT;
-    if (s[0] == '#') return WCODE_TOK_PREPROC;
+    if (lang && strcmp(lang, "lua") == 0 && s[0] == '-' && n >= 2 && s[1] == '-')
+        return WCODE_TOK_COMMENT;   /* Lua's line comment */
+    if (s[0] == '#' && !(lang && strcmp(lang, "lua") == 0))
+        return WCODE_TOK_PREPROC;   /* Lua has no preprocessor */
     if (s[0] == '"' || s[0] == '\'') return WCODE_TOK_STRING;
 
     if (isdigit((unsigned char)s[0])) return WCODE_TOK_NUMBER;
 
     /* Identifier. */
     if (isalpha((unsigned char)s[0]) || s[0] == '_') {
-        if (in_list(s, n, g_c_keywords)) return WCODE_TOK_KEYWORD;
-        return WCODE_TOK_PLAIN;
+        if (lang && strcmp(lang, "lua") == 0)
+            return in_list(s, n, g_lua_keywords) ? WCODE_TOK_KEYWORD
+                                                 : WCODE_TOK_PLAIN;
+        return in_list(s, n, g_c_keywords) ? WCODE_TOK_KEYWORD
+                                           : WCODE_TOK_PLAIN;
     }
     return WCODE_TOK_PLAIN;
 }
@@ -93,6 +116,12 @@ int wcode_syntax_line(const char *line, const char *lang, WCodeRun *runs,
         runs[0].kind = WCODE_TOK_COMMENT;
         return 1;
     }
+    if (lang && strcmp(lang, "lua") == 0 && len >= 2 && line[0] == '-' && line[1] == '-') {
+        runs[0].col = 0;
+        runs[0].len = len;
+        runs[0].kind = WCODE_TOK_COMMENT;
+        return 1;
+    }
 
     while (i < len && n < max_runs) {
         if (isspace((unsigned char)line[i])) {
@@ -105,6 +134,15 @@ int wcode_syntax_line(const char *line, const char *lang, WCodeRun *runs,
             continue;
         }
         if (line[i] == '/' && i + 1 < len && (line[i+1] == '/' || line[i+1] == '*')) {
+            runs[n].col = i;
+            runs[n].len = len - i;
+            runs[n].kind = WCODE_TOK_COMMENT;
+            n++;
+            break;
+        }
+        /* Lua's line comment. */
+        if (lang && strcmp(lang, "lua") == 0 &&
+            line[i] == '-' && i + 1 < len && line[i+1] == '-') {
             runs[n].col = i;
             runs[n].len = len - i;
             runs[n].kind = WCODE_TOK_COMMENT;

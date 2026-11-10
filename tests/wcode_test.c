@@ -190,6 +190,10 @@ static void test_syntax(void) {
     CHECK(strcmp(wcode_lang_for_path("a.c"), "c") == 0, ".c is C");
     CHECK(strcmp(wcode_lang_for_path("a.h"), "c") == 0, ".h is C");
     CHECK(strcmp(wcode_lang_for_path("a.hc"), "holyc") == 0, ".hc is HolyC");
+    /* .WET applets, VWS forms and Wua scripts are Lua. */
+    CHECK(strcmp(wcode_lang_for_path("a.wet"), "lua") == 0, ".wet is Lua");
+    CHECK(strcmp(wcode_lang_for_path("a.vws"), "lua") == 0, ".vws is Lua");
+    CHECK(strcmp(wcode_lang_for_path("a.lua"), "lua") == 0, ".lua is Lua");
     CHECK(strcmp(wcode_lang_for_path("README.md"), "text") == 0, ".md is text");
     CHECK(strcmp(wcode_lang_for_path("noext"), "c") == 0, "no extension defaults to C");
 
@@ -201,6 +205,31 @@ static void test_syntax(void) {
     CHECK(wcode_tok_classify("\"s", 2, "c", 0) == WCODE_TOK_STRING, "string literal");
     CHECK(wcode_tok_classify("#include", 8, "c", 0) == WCODE_TOK_PREPROC, "preprocessor");
     CHECK(wcode_tok_classify("42", 2, "c", 0) == WCODE_TOK_NUMBER, "number literal");
+
+    /* Lua: its own keywords, its own comment, and no preprocessor. */
+    CHECK(wcode_tok_classify("function", 8, "lua", 0) == WCODE_TOK_KEYWORD,
+          "function is a Lua keyword");
+    CHECK(wcode_tok_classify("wet", 3, "lua", 0) == WCODE_TOK_KEYWORD,
+          "wet is a Lua-surface keyword");
+    CHECK(wcode_tok_classify("return", 6, "lua", 0) == WCODE_TOK_KEYWORD,
+          "return is a Lua keyword");
+    CHECK(wcode_tok_classify("foo", 3, "lua", 0) == WCODE_TOK_PLAIN,
+          "foo is plain in Lua");
+    CHECK(wcode_tok_classify("-- c", 4, "lua", 0) == WCODE_TOK_COMMENT,
+          "-- is a Lua comment");
+    CHECK(wcode_tok_classify("#x", 2, "lua", 0) != WCODE_TOK_PREPROC,
+          "Lua has no preprocessor");
+    {
+        WCodeRun lr[32];
+        int ln = wcode_syntax_line("local x = 1 -- note", "lua", lr, 32);
+        int lk = 0, lc = 0;
+        for (int i = 0; i < ln; i++) {
+            if (lr[i].kind == WCODE_TOK_KEYWORD) lk = 1;
+            if (lr[i].kind == WCODE_TOK_COMMENT) lc = 1;
+        }
+        CHECK(lk, "Lua keyword coloured on a line");
+        CHECK(lc, "Lua -- comment coloured on a line");
+    }
 
     WCodeRun runs[64];
     int n = wcode_syntax_line("int x = 42; // hi", "c", runs, 64);
@@ -380,6 +409,77 @@ static void test_agent(void) {
     wcode_shutdown();
 }
 
+/* ---- The studio (VWS) ------------------------------------------------ */
+
+/*
+ * The IDE reaches the studio by shelling out, so the plumbing is testable with
+ * a stub binary -- no need for the real VWS build to be present.  This proves
+ * the ops; vws_templates_test proves the templates themselves.
+ */
+static void make_stub_vws(void) {
+    const char *path = "/tmp/wcode_stub_vws";
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fputs("#!/bin/sh\n"
+          "case \"$1\" in\n"
+          "  --list)\n"
+          "    echo 'blank        Blank Applet   320x200   An empty applet'\n"
+          "    echo 'dialog       Dialog         360x160   A prompt and OK/Cancel'\n"
+          "    exit 0 ;;\n"
+          "  --new)\n"
+          "    case \"$2\" in\n"
+          "      blank|dialog) ;;\n"
+          "      *) echo \"vws: unknown template '$2'\" >&2; exit 2 ;;\n"
+          "    esac\n"
+          "    printf 'wet.applet {\\n  title = \"x\"\\n}\\n' > \"$3\"\n"
+          "    echo \"vws: wrote $3\"\n"
+          "    exit 0 ;;\n"
+          "esac\n"
+          "exit 2\n", f);
+    fclose(f);
+    chmod(path, 0755);
+}
+
+static void test_studio(void) {
+    printf("-- studio (VWS) ops\n");
+    char resp[70000];
+    make_stub_vws();
+
+    /* templates -- the picker table comes back as text. */
+    wcode_agent_handle("{\"op\":\"templates\",\"vws\":\"/tmp/wcode_stub_vws\"}",
+                       resp, sizeof(resp));
+    CHECK(strstr(resp, "\"status\":\"ok\"") != NULL, "templates ok");
+    CHECK(strstr(resp, "blank") != NULL, "templates lists blank");
+    CHECK(strstr(resp, "dialog") != NULL, "templates lists dialog");
+
+    /* template -- creates the file and opens it. */
+    wcode_agent_handle(
+        "{\"op\":\"template\",\"name\":\"dialog\",\"path\":\"/tmp/wcode_stub.vws\","
+        "\"vws\":\"/tmp/wcode_stub_vws\"}", resp, sizeof(resp));
+    CHECK(strstr(resp, "\"status\":\"ok\"") != NULL, "template ok");
+    CHECK(strstr(resp, "/tmp/wcode_stub.vws") != NULL, "template returns the path");
+
+    FILE *f = fopen("/tmp/wcode_stub.vws", "r");
+    CHECK(f != NULL, "template wrote the file");
+    if (f) {
+        char buf[256] = {0};
+        fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        CHECK(strstr(buf, "wet.applet") != NULL, "written file is a .wet applet");
+    }
+
+    /* An unknown template is an error, not a crash. */
+    wcode_agent_handle(
+        "{\"op\":\"template\",\"name\":\"nope\","
+        "\"vws\":\"/tmp/wcode_stub_vws\"}", resp, sizeof(resp));
+    CHECK(strstr(resp, "\"status\":\"error\"") != NULL, "unknown template errors");
+
+    /* A missing name is an error too. */
+    wcode_agent_handle("{\"op\":\"template\",\"vws\":\"/tmp/wcode_stub_vws\"}",
+                       resp, sizeof(resp));
+    CHECK(strstr(resp, "\"status\":\"error\"") != NULL, "missing name errors");
+}
+
 int main(void) {
     printf("=== W-CODE self-test ===\n");
     test_buffer_basics();
@@ -394,6 +494,7 @@ int main(void) {
     test_diag_parse();
     test_json();
     test_agent();
+    test_studio();
     printf("\n=== wcode: %d passed, %d failed ===\n", passed, failures);
     return failures ? 1 : 0;
 }

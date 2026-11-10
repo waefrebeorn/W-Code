@@ -16,6 +16,8 @@
  *   keys    -- {keys:[...]} replay logical keys through the editor
  *   build   -- {cwd, argv:[...]} run a build, return output + diagnostics
  *   diags   -- last build's diagnostics
+ *   templates -- {vws?} list the VWS templates (shells out to the vws CLI)
+ *   template  -- {name, path?, vws?} create <name>.vws from a template and open it
  *   help    -- op list
  */
 
@@ -23,6 +25,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>   /* getcwd, for an absolute path under the project root */
 #include <string.h>
 
 /* ---- Shared IDE state ---------------------------------------------- */
@@ -491,10 +494,112 @@ static void op_diags(char *out, size_t cap, const char *req) {
     emit_obj(out, cap, "ok", body);
 }
 
+/* ------------------------------------------------------------- the studio */
+/*
+ * The IDE does NOT link VWS.  It shells out to the vws CLI -- the same fork/exec
+ * shape the build op already uses -- so the template library keeps exactly one
+ * owner and the designer and the IDE can never disagree about what a template
+ * contains.  The binary is taken from the request's "vws" field, then
+ * $WCODE_VWS, then plain "vws" on PATH.
+ */
+
+static char *vws_bin(const char *req) {
+    char *p = wcode_json_str(req, "vws");
+    if (p && p[0]) return p;
+    const char *env = getenv("WCODE_VWS");
+    if (env && env[0]) return strdup(env);
+    return strdup("vws");
+}
+
+/* An absolute path for a new file under the project root, so the parent
+ * process can open it after wcode_run chdirs only its child. */
+static void root_path(char *out, size_t cap, const char *name) {
+    if (g_wc.root[0] == '/') {
+        snprintf(out, cap, "%s/%s.vws", g_wc.root, name);
+        return;
+    }
+    char cwd[WCODE_MAX_PATH];
+    if (getcwd(cwd, sizeof cwd))
+        snprintf(out, cap, "%s/%s/%s.vws", cwd, g_wc.root, name);
+    else
+        snprintf(out, cap, "%s/%s.vws", g_wc.root, name);
+}
+
+static void op_templates(char *out, size_t cap, const char *req) {
+    char *bin = vws_bin(req);
+    char *argv[3] = { bin, "--list", NULL };
+    char *text = NULL;
+    size_t len = 0;
+    int status = wcode_run(g_wc.root, argv, &text, &len);
+    free(bin);
+    if (status != 0 || !text) {
+        emit_obj(out, cap, "error", ",\"error\":\"vws --list failed\"");
+        free(text);
+        return;
+    }
+    char body[16384];
+    size_t bn = 0;
+    bn += (size_t)snprintf(body + bn, sizeof(body) - bn, ",\"templates\":\"");
+    bn += (size_t)wcode_json_escape(text, body + bn, sizeof(body) - bn - 4);
+    snprintf(body + bn, sizeof(body) - bn, "\"");
+    emit_obj(out, cap, "ok", body);
+    free(text);
+}
+
+static void op_template(char *out, size_t cap, const char *req) {
+    char *name = wcode_json_str(req, "name");
+    if (!name || !name[0]) {
+        emit_obj(out, cap, "error", ",\"error\":\"name required\"");
+        free(name);
+        return;
+    }
+    /* A caller-supplied path is heap (wcode_json_str); the default below is a
+     * stack buffer, so remember which one we are holding before freeing. */
+    char *path = wcode_json_str(req, "path");
+    bool path_heap = (path && path[0]);
+    char defpath[WCODE_MAX_PATH];
+    if (!path_heap) {
+        root_path(defpath, sizeof defpath, name);
+        path = defpath;
+    }
+
+    char *bin = vws_bin(req);
+    char *argv[5] = { bin, "--new", name, path, NULL };
+    char *text = NULL;
+    size_t len = 0;
+    int status = wcode_run(g_wc.root, argv, &text, &len);
+    free(bin);
+    free(text);
+    if (status != 0) {
+        emit_obj(out, cap, "error", ",\"error\":\"unknown template or cannot write\"");
+        free(name);
+        if (path_heap) free(path);
+        return;
+    }
+
+    /* Land the agent in the new program. */
+    int rc = wcode_buf_load(&g_wc.buf, path);
+    wcode_ed_init(&g_wc.ed);
+    free(name);
+    if (rc != 0) {
+        emit_obj(out, cap, "error", ",\"error\":\"created but could not open\"");
+        if (path_heap) free(path);
+        return;
+    }
+    char esc[WCODE_MAX_PATH * 2];
+    wcode_json_escape(path, esc, sizeof esc);
+    char extra[WCODE_MAX_PATH * 2 + 64];
+    snprintf(extra, sizeof(extra), ",\"path\":\"%s\",\"lines\":%d",
+             esc, g_wc.buf.n_lines);
+    emit_obj(out, cap, "ok", extra);
+    if (path_heap) free(path);
+}
+
 static void op_help(char *out, size_t cap) {
     emit_obj(out, cap, "ok",
              ",\"ops\":[\"status\",\"list\",\"read\",\"open\",\"write\","
-             "\"save\",\"edit\",\"keys\",\"build\",\"diags\",\"help\"]");
+             "\"save\",\"edit\",\"keys\",\"build\",\"diags\",\"templates\","
+             "\"template\",\"help\"]");
 }
 
 /* ---- Dispatch ------------------------------------------------------ */
@@ -519,6 +624,8 @@ void wcode_agent_handle(const char *req, char *resp, size_t resp_cap) {
     else if (strcmp(op, "keys")  == 0) op_keys(resp, resp_cap, req);
     else if (strcmp(op, "build") == 0) op_build(resp, resp_cap, req);
     else if (strcmp(op, "diags") == 0) op_diags(resp, resp_cap, req);
+    else if (strcmp(op, "templates") == 0) op_templates(resp, resp_cap, req);
+    else if (strcmp(op, "template") == 0)  op_template(resp, resp_cap, req);
     else if (strcmp(op, "help")  == 0) op_help(resp, resp_cap);
     else {
         char e[256];

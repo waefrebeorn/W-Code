@@ -3,6 +3,7 @@
  *
  *   wcode                 open the TUI in the current directory
  *   wcode <path>          open the TUI with <path> loaded
+ *   wcode --root <dir>    set the project root (default ".")
  *   wcode --agent         read newline-delimited JSON commands from stdin and
  *                         write one JSON response per line to stdout
  *   wcode --agent <file>  same, but read the commands from a file
@@ -30,12 +31,13 @@ static void usage(void) {
     printf("W-CODE " WCODE_VERSION " -- the WuBuOS agentic IDE\n\n"
            "usage:\n"
            "  wcode [path]        open the editor (path optional)\n"
+           "  wcode --root <dir>  set the project root (default \".\")\n"
            "  wcode --agent       agent mode: JSON lines on stdin/stdout\n"
            "  wcode --agent FILE  agent mode reading commands from FILE\n"
            "  wcode --version\n"
            "  wcode --help\n\n"
            "system code: C11 and HolyC.  agent ops: status list read open\n"
-           "write save edit keys build diags help\n");
+           "write save edit keys build diags templates template help\n");
 }
 
 static int run_agent(FILE *in, FILE *out) {
@@ -66,6 +68,11 @@ int main(int argc, char **argv) {
             if (i + 1 < argc && argv[i+1][0] != '-') {
                 agent_file = argv[++i];
             }
+        } else if (strcmp(argv[i], "--root") == 0) {
+            /* The project root.  An agent driving the IDE on someone else's
+             * checkout needs this; without it the root is always ".". */
+            if (i + 1 < argc) root = argv[++i];
+            else { fprintf(stderr, "wcode: --root needs a path\n"); return 2; }
         } else if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
             printf("W-CODE " WCODE_VERSION "\n");
             return 0;
