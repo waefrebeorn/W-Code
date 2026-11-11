@@ -26,6 +26,8 @@ from the human's.
 └──────────────────────────────────────────────────────────┘
 ```
 
+> **~WuBu~ AGI** — one system, many repositories. This is the **agentic IDE**. The Body is [WuBuOS](https://github.com/waefrebeorn/WuBuOS), the Brain wubuwizard, the Compiler WuBuNOS.
+
 ## Build
 
 ```
