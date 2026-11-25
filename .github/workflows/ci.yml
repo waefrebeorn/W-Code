@@ -1,0 +1,35 @@
+name: ci
+
+# W-Code is the IDE for a self-hosted OS, so it is not a toy that may rot: every push
+# builds it and runs its own test suite. These are the two commands a developer runs
+# locally (`make -j`, `make test`), deliberately -- CI that runs a different pipeline than
+# the developer tests the pipeline instead of the code.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          gcc --version | head -1
+          make --version | head -1
+
+      - name: Build
+        run: make -j"$(nproc)"
+
+      - name: Test
+        run: make test
+
+      - name: Show the built binary
+        run: |
+          ls -l wcode
+          file wcode || true
